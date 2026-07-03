@@ -24,6 +24,27 @@ def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "destructive: mutating integration tests")
 
 
+@pytest.fixture(autouse=True)
+def _isolate_settings_env(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep a developer's real ``.env`` / exported ``THOUGHTSPOT_*`` out of unit tests.
+
+    The collection hook calls ``load_dotenv()`` and ``Settings`` also reads ``.env``
+    directly, so on a configured machine either would inject real credentials — which
+    breaks tests that assert the no-credentials path. Clear the vars, disable ``.env``
+    file loading, and reset the settings cache before each non-live test. Live tests are
+    left untouched: they need the real environment.
+    """
+    if "live" in request.keywords:
+        return
+
+    from thoughtspot_mcp.config import Settings, get_settings
+
+    for var in [key for key in os.environ if key.startswith("THOUGHTSPOT_")]:
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
+    get_settings.cache_clear()
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     load_dotenv()
     has_creds = _has_live_creds()
