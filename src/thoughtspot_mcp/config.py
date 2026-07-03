@@ -37,8 +37,16 @@ class Settings(BaseSettings):
 
     @property
     def api_base_url(self) -> str:
-        """Full v2.0 REST API root, e.g. https://host/api/rest/2.0."""
-        return self.thoughtspot_host.rstrip("/") + API_V2_PATH
+        """Full v2.0 REST API root, e.g. https://host/api/rest/2.0.
+
+        Accepts a bare host (``my-instance.thoughtspot.cloud``) as well as a full
+        URL; a missing scheme defaults to ``https://`` so a schemeless host does
+        not produce an opaque transport error.
+        """
+        host = self.thoughtspot_host.strip().rstrip("/")
+        if host and "://" not in host:
+            host = f"https://{host}"
+        return host + API_V2_PATH
 
     @property
     def has_static_token(self) -> bool:
