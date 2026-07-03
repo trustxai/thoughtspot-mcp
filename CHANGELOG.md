@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/trustxai/thoughtspot-mcp/compare/v0.1.0...v0.1.1) (2026-07-03)
+
+
+### Bug Fixes
+
+* **deps:** move mcp[cli] extra out of runtime into dev group ([#10](https://github.com/trustxai/thoughtspot-mcp/issues/10)) ([f3e970e](https://github.com/trustxai/thoughtspot-mcp/commit/f3e970e8c5aad21f8a0079dfaaa7010b32ef8e38))
+
 ## 0.1.0 (2026-07-03)
 
 
