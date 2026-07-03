@@ -140,6 +140,26 @@ async def test_search_metadata_no_fallback_without_name_pattern(monkeypatch: pyt
     assert len(fake.calls) == 1
 
 
+async def test_search_metadata_no_fallback_for_non_model_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-MODEL type filter (e.g. USER) must never be silently dropped.
+
+    Regression test: the fallback used to fire for ANY type whenever a
+    name_pattern was given and the scoped search was empty, so
+    type=USER + name_pattern could wrongly return e.g. a LIVEBOARD from an
+    unfiltered retry. It must only fire for the MODEL alias.
+    """
+    fake = _FakeClient(responses=[[]])
+    monkeypatch.setattr("thoughtspot_mcp.tools.metadata.get_client", lambda: fake)
+
+    result = await thoughtspot_search_metadata(SearchMetadataInput(type="USER", name_pattern="Jane%"))
+
+    assert result == "No metadata objects found."
+    assert len(fake.calls) == 1
+    body = fake.calls[0][2]
+    assert body is not None
+    assert body["metadata"] == [{"type": "USER", "name_pattern": "Jane%"}]
+
+
 async def test_search_metadata_dict_wrapped_response_shape(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeClient(responses=[{"metadata": [LIVEBOARD_ITEM]}])
     monkeypatch.setattr("thoughtspot_mcp.tools.metadata.get_client", lambda: fake)

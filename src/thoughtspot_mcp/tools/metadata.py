@@ -8,11 +8,13 @@ The v2.0 search API has no literal ``MODEL`` type — Models are Worksheets
 under the hood, addressed as ``type: LOGICAL_TABLE`` with
 ``subtypes: [WORKSHEET]``. ThoughtSpot's own product renamed Worksheets to
 "Models" in its UI, so callers naturally ask for ``type=MODEL``; this module
-accepts that as a convenience alias and resolves it to the real filter. A
-type-scoped search that returns nothing is also retried unfiltered by type
-when a ``name_pattern`` was supplied, since some deployments' Model/Worksheet
-objects don't surface consistently under ``LOGICAL_TABLE`` (observed in
-masava's staging-data-loader — see research/04).
+accepts that as a convenience alias and resolves it to the real filter. When
+a ``MODEL`` search with a ``name_pattern`` finds nothing, it is retried once
+unfiltered by type, since some deployments' Model/Worksheet objects don't
+surface consistently under ``LOGICAL_TABLE`` (observed in masava's
+staging-data-loader — see research/04). This fallback is scoped to the
+``MODEL`` alias only: it never silently drops an explicit, unambiguous type
+filter (e.g. ``type=USER``) that a caller asked for directly.
 """
 
 from __future__ import annotations
@@ -214,11 +216,12 @@ async def _search_metadata(
 async def thoughtspot_search_metadata(params: SearchMetadataInput) -> str:
     """Search for metadata objects (Liveboards, Answers, Models, Connections, Tags, Users, ...).
 
-    Wraps ``POST /metadata/search`` with a multi-strategy fallback: a
-    type-scoped search that finds nothing is retried unfiltered by type when
-    a ``name_pattern`` is also given, since Model/Worksheet objects don't
-    always surface consistently under a single type filter across
-    deployments.
+    Wraps ``POST /metadata/search`` with a multi-strategy fallback scoped to
+    the ``MODEL`` alias: a ``type=MODEL`` search that finds nothing is
+    retried unfiltered by type when a ``name_pattern`` is also given, since
+    Model/Worksheet objects don't always surface consistently under
+    ``LOGICAL_TABLE`` across deployments. Any other explicit ``type`` filter
+    (e.g. USER, LIVEBOARD) is never silently dropped.
 
     When to Use:
         - Find the GUID of a Liveboard, Answer, Model/Worksheet, Connection,
@@ -271,7 +274,7 @@ async def thoughtspot_search_metadata(params: SearchMetadataInput) -> str:
             offset=params.offset,
         )
 
-        if not items and resolved_type and params.name_pattern and not params.identifier:
+        if not items and params.type == "MODEL" and params.name_pattern and not params.identifier:
             items = await _search_metadata(
                 client,
                 identifier=None,
