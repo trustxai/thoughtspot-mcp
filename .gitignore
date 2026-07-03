@@ -1,0 +1,30 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local agent memory / planning state (never push to GitHub)
+.memory/
+
+# Environment variables (secrets)
+.env
+
+# IDE
+.idea/
+.cursor/plans/
+.cursor/skills/
+
+# Caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# OS
+.DS_Store
+Thumbs.db
