@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/trustxai/thoughtspot-mcp/compare/v0.1.1...v0.1.2) (2026-07-06)
+
+
+### Bug Fixes
+
+* **tml:** cap export_tml result under the 1 MB tool-result limit ([#13](https://github.com/trustxai/thoughtspot-mcp/issues/13)) ([44e8345](https://github.com/trustxai/thoughtspot-mcp/commit/44e8345c5762bea1cd6a8824f4ddc783178d9051)), closes [#12](https://github.com/trustxai/thoughtspot-mcp/issues/12)
+
 ## [0.1.1](https://github.com/trustxai/thoughtspot-mcp/compare/v0.1.0...v0.1.1) (2026-07-03)
 
 
