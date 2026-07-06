@@ -10,6 +10,7 @@ import pytest
 
 from thoughtspot_mcp.formatters import ResponseFormat
 from thoughtspot_mcp.tools.tml import (
+    MAX_TML_RESPONSE_BYTES,
     AsyncImportTmlInput,
     ExportTmlInput,
     ImportTmlInput,
@@ -197,6 +198,66 @@ async def test_export_dict_metadata_content_shape(monkeypatch: pytest.MonkeyPatc
 
     result = await thoughtspot_export_tml(ExportTmlInput(object_identifiers=["tbl-guid-1"], harvest_fqns=True))
     assert "tbl-guid-1" in result
+
+
+async def test_export_metadata_only_omits_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = [
+        {
+            "info": {"name": "My Liveboard", "type": "LIVEBOARD", "id": "lb1", "status": {"status_code": "OK"}},
+            "edoc": "guid: lb1\nliveboard:\n  name: My Liveboard\n",
+        },
+    ]
+    fake = _FakeClient(payload=payload)
+    _patch(monkeypatch, fake)
+
+    result = await thoughtspot_export_tml(ExportTmlInput(object_identifiers=["lb1"], include_content=False))
+
+    # Metadata is present, but the raw TML block is not inlined.
+    assert "My Liveboard" in result
+    assert "`lb1`" in result
+    assert "Metadata only" in result
+    assert "```yaml" not in result
+    assert "liveboard:" not in result
+
+
+async def test_export_size_guard_truncates_markdown(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An edoc whose TML alone exceeds the byte budget.
+    huge = "guid: big\ntable:\n  name: BIG\n" + ("x" * 2_000_000)
+    payload = [{"info": {"name": "BIG", "type": "LOGICAL_TABLE", "id": "big"}, "edoc": huge}]
+    fake = _FakeClient(payload=payload)
+    _patch(monkeypatch, fake)
+
+    result = await thoughtspot_export_tml(ExportTmlInput(object_identifiers=["big"]))
+
+    assert len(result.encode("utf-8")) <= MAX_TML_RESPONSE_BYTES
+    assert "truncated" in result.lower()
+    assert "BIG" in result
+
+
+async def test_export_size_guard_json_downgrades(monkeypatch: pytest.MonkeyPatch) -> None:
+    huge = "guid: big\ntable:\n  name: BIG\n" + ("x" * 2_000_000)
+    payload = [{"info": {"name": "BIG", "type": "LOGICAL_TABLE", "id": "big"}, "edoc": huge}]
+    fake = _FakeClient(payload=payload)
+    _patch(monkeypatch, fake)
+
+    result = await thoughtspot_export_tml(
+        ExportTmlInput(object_identifiers=["big"], response_format=ResponseFormat.JSON)
+    )
+
+    assert len(result.encode("utf-8")) <= MAX_TML_RESPONSE_BYTES
+    data = json.loads(result)  # still valid JSON, not a truncated blob
+    assert data["error"] == "response_too_large"
+    assert data["objects_exported"] == 1
+    assert data["objects"][0]["guid"] == "big"
+
+
+async def test_export_small_json_returned_raw(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = [{"info": {"name": "M", "type": "LOGICAL_TABLE", "id": "m"}, "edoc": _TABLE_EDOC}]
+    fake = _FakeClient(payload=payload)
+    _patch(monkeypatch, fake)
+
+    result = await thoughtspot_export_tml(ExportTmlInput(object_identifiers=["m"], response_format=ResponseFormat.JSON))
+    assert json.loads(result) == payload  # unchanged for small exports
 
 
 async def test_export_empty(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -112,6 +112,14 @@ class ExportTmlInput(BaseModel):
         "each exported edoc, and return a {type: {name: guid}} FQN map instead of raw TML. "
         "Use this to collect the GUIDs needed to wire up a new model/liveboard TML.",
     )
+    include_content: bool = Field(
+        default=True,
+        description="Inline the raw TML of each object (default). Set false to return only "
+        "per-object metadata (name, type, GUID, status, content size) — useful to inspect a "
+        "large export cheaply, then re-export a single object to get its full TML. The response "
+        "is always capped at ~900 KB to stay under the client's 1 MB tool-result limit; oversized "
+        "content is truncated with a note regardless of this flag.",
+    )
     response_format: ResponseFormat = Field(default=ResponseFormat.MARKDOWN)
 
 
@@ -178,6 +186,134 @@ class TmlImportStatusInput(BaseModel):
 # ---------------------------------------------------------------------------
 # Response helpers (defensive against v2.0 shape polymorphism)
 # ---------------------------------------------------------------------------
+
+# Cap the whole tool result comfortably under the 1 MB tool-result limit that
+# MCP clients (notably Claude Desktop: "Tool result is too large. Maximum size
+# is 1MB.") enforce, leaving headroom for the JSON-RPC envelope wrapped around
+# this string. Exporting a Liveboard with ``export_associated`` pulls in the
+# underlying model plus every referenced table, whose combined TML easily
+# exceeds 1 MB — without this guard the client rejects the entire result and the
+# caller sees nothing at all.
+MAX_TML_RESPONSE_BYTES = 900_000
+
+# Headroom reserved while building the per-object markdown for the closing
+# guidance note (truncated/omitted object names).
+_FOOTER_RESERVE_BYTES = 800
+
+
+def _utf8_len(text: str) -> int:
+    return len(text.encode("utf-8"))
+
+
+def _truncate_to_bytes(text: str, max_bytes: int) -> tuple[str, bool]:
+    """Cut ``text`` so its UTF-8 encoding fits in ``max_bytes``.
+
+    Returns ``(text, truncated)``; the cut lands on a UTF-8 boundary so the
+    result is always valid text.
+    """
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text, False
+    if max_bytes <= 0:
+        return "", True
+    return encoded[:max_bytes].decode("utf-8", errors="ignore"), True
+
+
+def _clamp_response(text: str) -> str:
+    """Final safety net: guarantee any returned string fits the byte budget."""
+    if _utf8_len(text) <= MAX_TML_RESPONSE_BYTES:
+        return text
+    suffix = "\n\n… _[response truncated to fit the tool-result size limit]_"
+    clipped, _ = _truncate_to_bytes(text, MAX_TML_RESPONSE_BYTES - _utf8_len(suffix))
+    return clipped + suffix
+
+
+def _render_export_markdown(edocs: list[Any], *, include_content: bool) -> str:
+    """Build the export markdown, keeping the total under the byte budget.
+
+    Every object's metadata (name / type / GUID / status) is always listed;
+    inlined TML content is truncated — or omitted for later objects once the
+    budget runs out — with an explicit note, mirroring the row-truncation guard
+    the data tools use.
+    """
+    lines = ["# Exported TML", "", f"Exported **{len(edocs)}** object(s).", ""]
+    if not include_content:
+        lines.append("_Metadata only — set `include_content: true` to inline the TML._")
+        lines.append("")
+
+    truncated: list[str] = []
+    omitted: list[str] = []
+    fence_overhead = _utf8_len("\n```yaml\n\n```\n")
+
+    for edoc in edocs:
+        info = _edoc_info(edoc)
+        status = info.get("status", {})
+        status_code = status.get("status_code", "?") if isinstance(status, dict) else "?"
+        name = info.get("name", "(unnamed)")
+        guid = info.get("id", info.get("id_guid", "?"))
+        obj_type = info.get("type", "?")
+
+        lines.append(f"## {name} ({obj_type})")
+        lines.append(f"- GUID: `{guid}`  •  status: {status_code}")
+
+        content = _edoc_content(edoc) if include_content else ""
+        if not content:
+            lines.append("")
+            continue
+
+        body = content.rstrip()
+        used = _utf8_len("\n".join(lines))
+        content_budget = MAX_TML_RESPONSE_BYTES - used - _FOOTER_RESERVE_BYTES - fence_overhead
+
+        if content_budget <= 0:
+            omitted.append(str(name))
+            lines.append(f"- _TML content omitted ({_utf8_len(body)} bytes) — response size limit reached._")
+            lines.append("")
+            continue
+
+        clipped, was_truncated = _truncate_to_bytes(body, content_budget)
+        lines.append("")
+        lines.append("```yaml")
+        lines.append(clipped.rstrip("\n"))
+        lines.append("```")
+        if was_truncated:
+            truncated.append(str(name))
+            lines.append(
+                f"- ⚠️ _TML truncated ({_utf8_len(clipped)} of {_utf8_len(body)} bytes shown) "
+                f"to fit the response size limit._"
+            )
+        lines.append("")
+
+    if truncated or omitted:
+        note = f"⚠️ Response capped at ~{MAX_TML_RESPONSE_BYTES // 1000} KB to stay under the client tool-result limit."
+        if truncated:
+            note += f" Truncated: {', '.join(truncated)}."
+        if omitted:
+            note += f" Content omitted: {', '.join(omitted)}."
+        note += (
+            " For complete TML, export one object at a time (or with `export_associated: false`), "
+            "or use `harvest_fqns: true` if you only need the GUIDs."
+        )
+        lines.append("---")
+        lines.append(note)
+
+    return _clamp_response("\n".join(lines))
+
+
+def _export_metadata_summary(edocs: list[Any]) -> list[dict[str, Any]]:
+    """Small per-object summary used when a full export is too large for JSON."""
+    summary: list[dict[str, Any]] = []
+    for edoc in edocs:
+        info = _edoc_info(edoc)
+        summary.append(
+            {
+                "name": info.get("name"),
+                "type": info.get("type"),
+                "guid": info.get("id", info.get("id_guid")),
+                "content_bytes": _utf8_len(_edoc_content(edoc)),
+            }
+        )
+    return summary
 
 
 def _edoc_records(body: Any) -> list[Any]:
@@ -337,6 +473,15 @@ async def thoughtspot_export_tml(params: ExportTmlInput) -> str:
         connection GUID plus each table GUID) rather than raw TML — the exact
         shortcut needed to inject FQNs into a freshly generated model TML.
 
+    Size limit:
+        The result is always capped at ~900 KB so it stays under the 1 MB
+        tool-result limit MCP clients (e.g. Claude Desktop) enforce. A large
+        export — a Liveboard with ``export_associated`` brings in its model and
+        every table — has its inlined TML truncated (with a note) rather than
+        returning an oversized result the client would reject. Set
+        ``include_content: false`` to list only per-object metadata, or export
+        one object at a time to retrieve its full TML.
+
     Returns:
         Markdown (or JSON) with one section per exported object (type, name,
         GUID, status, and the TML content), or — in harvest mode — the FQN map.
@@ -400,29 +545,28 @@ async def thoughtspot_export_tml(params: ExportTmlInput) -> str:
             return "\n".join(lines)
 
         if params.response_format == ResponseFormat.JSON:
-            return to_json(body)
+            out = to_json(body)
+            if _utf8_len(out) <= MAX_TML_RESPONSE_BYTES:
+                return out
+            # Too large to return raw JSON without breaching the client limit —
+            # downgrade to a valid, compact metadata-only summary rather than
+            # emit an oversized (and thus rejected) payload.
+            return to_json(
+                {
+                    "error": "response_too_large",
+                    "message": (
+                        f"Export exceeded the ~{MAX_TML_RESPONSE_BYTES // 1000} KB tool-result limit; "
+                        "returning a metadata-only summary. Export one object at a time for full TML."
+                    ),
+                    "objects_exported": len(edocs),
+                    "objects": _export_metadata_summary(edocs),
+                }
+            )
 
         if not edocs:
             return "No TML exported — check the object identifiers and type."
 
-        lines = ["# Exported TML", "", f"Exported **{len(edocs)}** object(s).", ""]
-        for edoc in edocs:
-            info = _edoc_info(edoc)
-            status = info.get("status", {})
-            status_code = status.get("status_code", "?") if isinstance(status, dict) else "?"
-            name = info.get("name", "(unnamed)")
-            guid = info.get("id", info.get("id_guid", "?"))
-            obj_type = info.get("type", "?")
-            content = _edoc_content(edoc)
-            lines.append(f"## {name} ({obj_type})")
-            lines.append(f"- GUID: `{guid}`  •  status: {status_code}")
-            if content:
-                lines.append("")
-                lines.append("```yaml")
-                lines.append(content.rstrip())
-                lines.append("```")
-            lines.append("")
-        return "\n".join(lines)
+        return _render_export_markdown(edocs, include_content=params.include_content)
     except Exception as exc:
         return handle_api_error(exc)
 
